@@ -678,7 +678,7 @@ def _chunk_cumsum_fwd(dt, A, chunk_size, dt_bias=None, dt_softplus=False, dt_lim
     assert A.shape == (nheads,)
     if dt_bias is not None:
         assert dt_bias.shape == (nheads,)
-    nchunks = math.ceil(seqlen / chunk_size)
+    nchunks = (seqlen+chunk_size-1) // chunk_size
     dt_out = torch.empty(batch, nheads, nchunks, chunk_size, device=dt.device, dtype=torch.float32)
     dA_cumsum = torch.empty(batch, nheads, nchunks, chunk_size, device=dt.device, dtype=torch.float32)
     grid_chunk_cs = lambda META: (batch, nchunks, triton.cdiv(nheads, META['BLOCK_SIZE_H']))
@@ -707,7 +707,7 @@ def _chunk_cumsum_bwd(ddA, ddt_out, dt, A, dt_bias=None, dt_softplus=False, dt_l
     assert A.shape == (nheads,)
 
     assert dt_bias is None or dt_bias.shape == (nheads,)
-    ddt_bias = None if dt_bias is None else torch.zeros_like(dt_bias, dtype=torch.float32)
+    ddt_bias = torch.zeros(nheads, dtype=torch.float32, device=A.device) # always alloc to allow reset_to_zero
     if ddt is not None: assert ddt.shape == dt.shape
     else: ddt = torch.empty_like(dt)
 
@@ -730,7 +730,7 @@ def _chunk_cumsum_bwd(ddA, ddt_out, dt, A, dt_bias=None, dt_softplus=False, dt_l
             HAS_DT_BIAS=dt_bias is not None,
             BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
         )
-    return ddt, dA, ddt_bias
+    return ddt, dA, None if dt_bias is None else ddt_bias
 
 
 def _chunk_state_fwd(B, x, dt, dA_cumsum, seq_idx=None, states=None, states_in_fp32=True):
@@ -825,7 +825,8 @@ def _chunk_state_bwd_db(x, dt, dA_cumsum, dstates, seq_idx=None, B=None, ngroups
         ddA_cumsum_strides = (0, 0, 0, 0)
     nheads_ngroups_ratio = nheads // ngroups
     sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
-    nheads_per_program = max(min(math.ceil(batch * nchunks * nheads / sm_count), nheads_ngroups_ratio), 1)
+    nheads_per_program = (batch*nchunks*nheads + sm_count-1) // sm_count
+    nheads_per_program = max(min(nheads_per_program, nheads_ngroups_ratio), 1)
     nsplits = triton.cdiv(nheads_ngroups_ratio, nheads_per_program)
     dB = torch.empty(batch, seqlen, nsplits, ngroups, dstate, device=x.device, dtype=torch.float32)
     grid_db = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(dstate, META['BLOCK_SIZE_N']),

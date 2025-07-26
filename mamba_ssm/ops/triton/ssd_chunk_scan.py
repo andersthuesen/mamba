@@ -1329,7 +1329,7 @@ def _chunk_scan_bwd_dz(x, z, out, dout, chunk_size, has_ddAcs=True, D=None, dz=N
     assert z.shape == x.shape
     assert out.shape == x.shape
     assert dout.shape == out.shape
-    nchunks = math.ceil(seqlen / chunk_size)
+    nchunks = (seqlen+chunk_size-1)//chunk_size
     if D is not None:
         assert D.shape == (nheads, headdim) or D.shape == (nheads,)
         assert D.stride(-1) == 1
@@ -1432,7 +1432,8 @@ def _chunk_scan_bwd_dC(prev_states, dA_cumsum, dout, seq_idx=None, C=None, ngrou
         ddA_cumsum_prev_strides = (0, 0, 0, 0)
     nheads_ngroups_ratio = nheads // ngroups
     sm_count = torch.cuda.get_device_properties(dout.device).multi_processor_count
-    nheads_per_program = max(min(math.ceil(batch * nchunks * nheads / sm_count), nheads_ngroups_ratio), 1)
+    nheads_per_program = (batch*nchunks*nheads + sm_count-1) // sm_count
+    nheads_per_program = max(min(nheads_per_program, nheads_ngroups_ratio), 1)
     nsplits = triton.cdiv(nheads_ngroups_ratio, nheads_per_program)
     dC = torch.empty(batch, seqlen, nsplits, ngroups, dstate, device=dout.device, dtype=torch.float32)
     grid_dc = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(dstate, META['BLOCK_SIZE_N']),
@@ -1479,7 +1480,8 @@ def _chunk_scan_bwd_dcb(x, dt, dA_cumsum, dout, seq_idx=None, CB=None, ngroups=1
         ddA_cumsum_strides = (0, 0, 0, 0, 0)
     nheads_ngroups_ratio = nheads // ngroups
     sm_count = torch.cuda.get_device_properties(x.device).multi_processor_count
-    nheads_per_program = max(min(math.ceil(batch * nchunks * nheads / sm_count), nheads_ngroups_ratio), 1)
+    nheads_per_program = (batch*nchunks*nheads + sm_count-1) // sm_count
+    nheads_per_program = max(min(nheads_per_program, nheads_ngroups_ratio), 1)
     nsplits = triton.cdiv(nheads_ngroups_ratio, nheads_per_program)
     dcb = torch.empty(batch, nchunks, nsplits, ngroups, chunk_size, chunk_size, device=x.device, dtype=torch.float32)
     grid_dcb = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(chunk_size, META['BLOCK_SIZE_N']),
