@@ -509,16 +509,17 @@ def _chunk_scan_bwd_dstates_kernel(
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4, pre_hook=init_to_zero(["ddA_cumsum_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
     ],
     key=['chunk_size', 'dstate', 'hdim'],
+    reset_to_zero=['ddA_cumsum_ptr'],
 )
 @triton.jit
 def _chunk_scan_bwd_dc_kernel(
@@ -733,19 +734,9 @@ def _chunk_scan_bwd_dx_kernel(
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
-        # triton.Config({'BLOCK_SIZE_M': 16}, num_stages=3, num_warps=4),
-        # triton.Config({'BLOCK_SIZE_M': 32}, num_stages=3, num_warps=4),
-        # triton.Config({'BLOCK_SIZE_M': 64}, num_stages=3, num_warps=4),
-        # triton.Config({'BLOCK_SIZE_M': 128}, num_stages=3, num_warps=4),
-        # triton.Config({'BLOCK_SIZE_M': 16}, num_stages=4, num_warps=8),
-        # triton.Config({'BLOCK_SIZE_M': 32}, num_stages=4, num_warps=8),
-        # triton.Config({'BLOCK_SIZE_M': 64}, num_stages=4, num_warps=8),
-        # triton.Config({'BLOCK_SIZE_M': 128}, num_stages=4, num_warps=8),
     ],
     key=['chunk_size', 'hdim'],
 )
-# @triton.heuristics({"BLOCK_SIZE_N": lambda args: max(triton.next_power_of_2(args["chunk_size"]), 16)})
-# @triton.heuristics({"BLOCK_SIZE_N": lambda args: 32})
 @triton.jit
 def _chunk_scan_bwd_dcb_kernel(
     # Pointers to matrices
@@ -1059,11 +1050,8 @@ def _chunk_scan_bwd_ddAcs_stable_kernel_old(
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
-        # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4),
-        # triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4),
-        # triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32}, num_stages=3, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64}, num_stages=3, num_warps=4),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128}, num_stages=3, num_warps=4),
@@ -1436,7 +1424,7 @@ def _chunk_scan_bwd_dC(prev_states, dA_cumsum, dout, seq_idx=None, C=None, ngrou
     if C is not None:
         assert C.shape == (batch, seqlen, ngroups, dstate)
         C_strides = (C.stride(0), C.stride(1), C.stride(2), C.stride(3))
-        ddA_cumsum_prev = torch.empty(batch, nheads, nchunks, chunk_size, device=dout.device, dtype=torch.float32)
+        ddA_cumsum_prev = torch.zeros(batch, nheads, nchunks, chunk_size, device=dout.device, dtype=torch.float32)
         ddA_cumsum_prev_strides = (ddA_cumsum_prev.stride(0), ddA_cumsum_prev.stride(2), ddA_cumsum_prev.stride(1), ddA_cumsum_prev.stride(3))
     else:
         C_strides = (0, 0, 0, 0)
@@ -1478,10 +1466,11 @@ def _chunk_scan_bwd_dcb(x, dt, dA_cumsum, dout, seq_idx=None, CB=None, ngroups=1
     if seq_idx is not None:
         assert seq_idx.shape == (batch, seqlen)
     if CB is not None:
+        # (main): I don't use this codepath and don't know if it's correct.
         assert CB.shape == (batch, nchunks, ngroups, chunk_size, chunk_size)
         CB_strides = (CB.stride(0), CB.stride(1), CB.stride(2), CB.stride(3), CB.stride(4))
         BLOCK_SIZE_M_min = 16
-        ddA_cumsum = torch.empty(batch, nheads, nchunks, triton.cdiv(chunk_size, BLOCK_SIZE_M_min),
+        ddA_cumsum = torch.zeros(batch, nheads, nchunks, triton.cdiv(chunk_size, BLOCK_SIZE_M_min),
                                 chunk_size, device=x.device, dtype=torch.float32)
         ddA_cumsum_strides = (ddA_cumsum.stride(0), ddA_cumsum.stride(2), ddA_cumsum.stride(1), ddA_cumsum.stride(3), ddA_cumsum.stride(4))
     else:
@@ -1513,10 +1502,7 @@ def _chunk_scan_bwd_dcb(x, dt, dA_cumsum, dout, seq_idx=None, CB=None, ngroups=1
             BLOCK_SIZE_K=max(triton.next_power_of_2(headdim), 16),
         )
     dcb = dcb.sum(2)
-    if ddA_cumsum is not None:
-        BLOCK_SIZE_M_actual = _chunk_scan_bwd_dcb_kernel.best_config.kwargs["BLOCK_SIZE_M"]
-        n_valid_blocks = (chunk_size + BLOCK_SIZE_M_actual - 1) // BLOCK_SIZE_M_actual
-        ddA_cumsum = ddA_cumsum[:, :, :, :n_valid_blocks].sum(dim=3)
+    if ddA_cumsum is not None: ddA_cumsum = ddA_cumsum.sum(dim=3)
     return dcb if CB is None else (dcb, ddA_cumsum)
 
 
@@ -1654,7 +1640,7 @@ def _chunk_scan_bwd_ddAcs_stable(x, dt, dA_cumsum, dout, cb):
     assert nheads % ngroups == 0
     assert cb.shape == (batch, nchunks, ngroups, chunk_size, chunk_size)
     BLOCK_SIZE_M_min = 32
-    ddA_cumsum = torch.empty(batch, nheads, nchunks, triton.cdiv(chunk_size, BLOCK_SIZE_M_min),
+    ddA_cumsum = torch.zeros(batch, nheads, nchunks, triton.cdiv(chunk_size, BLOCK_SIZE_M_min),
                              chunk_size, device=x.device, dtype=torch.float32)
     grid_ddtcs = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']), batch * nchunks, nheads)
     with torch.cuda.device(x.device.index):
@@ -1670,9 +1656,7 @@ def _chunk_scan_bwd_ddAcs_stable(x, dt, dA_cumsum, dout, cb):
             ddA_cumsum.stride(0), ddA_cumsum.stride(2), ddA_cumsum.stride(1), ddA_cumsum.stride(3), ddA_cumsum.stride(4),
             BLOCK_SIZE_K=max(triton.next_power_of_2(headdim), 16),
         )
-    BLOCK_SIZE_M_actual = _chunk_scan_bwd_ddAcs_stable_kernel.best_config.kwargs["BLOCK_SIZE_M"]
-    n_valid_blocks = (chunk_size + BLOCK_SIZE_M_actual - 1) // BLOCK_SIZE_M_actual
-    ddA_cumsum = ddA_cumsum[:, :, :, :n_valid_blocks].sum(dim=3)
+    ddA_cumsum = ddA_cumsum.sum(dim=3)
     return ddA_cumsum
 
 

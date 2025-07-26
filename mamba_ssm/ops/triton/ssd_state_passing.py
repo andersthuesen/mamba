@@ -250,7 +250,7 @@ def _state_passing_bwd(
         assert dfinal_states.shape == (batch, nheads, dim)
     BLOCK_SIZE_min = 64
     n_blocks = (dim + BLOCK_SIZE_min - 1) // BLOCK_SIZE_min
-    ddA_chunk_cumsum = torch.empty(batch, nheads, nchunks, n_blocks,
+    ddA_chunk_cumsum = torch.zeros(batch, nheads, nchunks, n_blocks,
                                     dtype=torch.float32, device=dA_chunk_cumsum.device)
     grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE']), batch, nheads)
     with torch.cuda.device(dout.device.index):
@@ -273,9 +273,7 @@ def _state_passing_bwd(
             HAS_DINITSTATES=dinitstates is not None,
             HAS_SEQ_IDX=seq_idx is not None,
         )
-    BLOCK_SIZE_actual = _state_passing_bwd_kernel.best_config.kwargs["BLOCK_SIZE"]
-    n_valid_blocks = (dim + BLOCK_SIZE_actual - 1) // BLOCK_SIZE_actual
-    ddA_chunk_cumsum = ddA_chunk_cumsum[..., :n_valid_blocks].sum(dim=-1).to(dtype=dA_chunk_cumsum.dtype)
+    ddA_chunk_cumsum = ddA_chunk_cumsum.sum(dim=-1).to(dtype=dA_chunk_cumsum.dtype)
     if states_dtype is not None and states_dtype == states.dtype:
         states_converted = states
     return (dstates, ddA_chunk_cumsum, dinitstates) if states_dtype is None else (dstates, ddA_chunk_cumsum, dinitstates, states_converted)
