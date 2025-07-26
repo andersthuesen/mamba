@@ -18,14 +18,40 @@ import triton.language as tl
 
 from einops import rearrange, repeat
 
-try:
-    from causal_conv1d import causal_conv1d_fn
-    from causal_conv1d.cpp_functions import causal_conv1d_fwd_function, causal_conv1d_bwd_function, causal_conv1d_update_function
-except ImportError:
-    causal_conv1d_fn = None
-    causal_conv1d_fwd_function = None
-    causal_conv1d_bwd_function = None
-    causal_conv1d_update_function = None
+### Patch 1: make causal_conv1d_fwd_function that transposes internally, to avoid custom_op having to see non-contig tensor
+from causal_conv1d import causal_conv1d_fn
+from causal_conv1d.cpp_functions import causal_conv1d_fwd_function, causal_conv1d_bwd_function, causal_conv1d_update_function, causal_conv1d_cuda
+
+@torch.library.custom_op(f"DaoAILabPatch::_causal_conv1d_fwd_cpp", mutates_args={"out", "final_states_out"})
+def _causal_conv1d_fwd_cpp(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    out: torch.Tensor,
+    final_states_out: torch.Tensor | None,
+    silu_activation: bool,
+) -> None:
+    causal_conv1d_cuda.causal_conv1d_fwd(
+        x.mT,
+        weight,
+        bias,
+        seq_idx,
+        initial_states,
+        out.mT,
+        final_states_out,
+        silu_activation,
+    )
+def causal_conv1d_fwd_function_transposed(
+    x, weight, bias, seq_idx, initial_states, final_states_out, silu_activation
+):
+    _causal_conv1d_fwd_cpp(
+        x, weight, bias, seq_idx, initial_states,
+        out:=torch.empty_like(x), final_states_out, silu_activation
+    )
+    return out
+###
 
 from mamba_ssm.ops.triton.ssd_bmm import _bmm_chunk_fwd, _bmm_chunk_bwd
 from mamba_ssm.ops.triton.ssd_chunk_state import _chunk_cumsum_fwd, _chunk_cumsum_bwd
@@ -764,6 +790,7 @@ def mamba_conv1d_scan_ref(xBC, conv1d_weight, conv1d_bias, dt, A, chunk_size, D=
     return rearrange(out, "b s h p -> b s (h p)")
 
 
+### Patch 1 is used here
 class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
 
     @staticmethod
@@ -788,10 +815,9 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         assert A.shape == (nheads,)
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + ngroups * dstate * 2, nheads], dim=-1)
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
-        xBC_conv = rearrange(
-            causal_conv1d_fwd_function(rearrange_and_update_stride(xBC, "b s d -> b d s"),
-                                                 conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
-            "b d s -> b s d"
+        assert xBC.stride(-2) % 8 == 0
+        xBC_conv = causal_conv1d_fwd_function_transposed(
+            xBC, conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]
         )
         x, B, C = torch.split(xBC_conv, [dim, ngroups * dstate, ngroups * dstate], dim=-1)
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
@@ -862,10 +888,9 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             out0_recompute, out1_recompute = out_recompute.split([d_nonssm, dim], dim=-1)
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
         # Recompute x, B, C
-        xBC_conv = rearrange(
-            causal_conv1d_fwd_function(rearrange_and_update_stride(xBC, "b s d -> b d s"),
-                                       conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]),
-            "b d s -> b s d"
+        assert xBC.stride(-2) % 8 == 0
+        xBC_conv = causal_conv1d_fwd_function_transposed(
+            xBC, conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]
         )
         x, B, C = torch.split(xBC_conv, [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
