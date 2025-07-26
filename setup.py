@@ -19,7 +19,6 @@ from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 import torch
 from torch.utils.cpp_extension import (
     BuildExtension,
-    CUDAExtension,
     CUDA_HOME,
     HIP_HOME
 )
@@ -37,9 +36,7 @@ PACKAGE_NAME = "mamba_ssm"
 BASE_WHEEL_URL = "https://github.com/state-spaces/mamba/releases/download/{tag_name}/{wheel_name}"
 
 # FORCE_BUILD: Force a fresh build locally, instead of attempting to find prebuilt wheels
-# SKIP_CUDA_BUILD: Intended to allow CI to use a simple `python setup.py sdist` run to copy over raw files, without any cuda compilation
 FORCE_BUILD = os.getenv("MAMBA_FORCE_BUILD", "FALSE") == "TRUE"
-SKIP_CUDA_BUILD = os.getenv("MAMBA_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAMBA_FORCE_CXX11_ABI", "FALSE") == "TRUE"
 
@@ -131,131 +128,6 @@ ext_modules = []
 
 
 HIP_BUILD = bool(torch.version.hip)
-
-if not SKIP_CUDA_BUILD:
-    print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
-    TORCH_MAJOR = int(torch.__version__.split(".")[0])
-    TORCH_MINOR = int(torch.__version__.split(".")[1])
-
-    cc_flag = []
-
-    if HIP_BUILD:
-        check_if_hip_home_none(PACKAGE_NAME)
-
-        rocm_home = os.getenv("ROCM_PATH")
-        _, hip_version = get_hip_version(rocm_home)
-
-        if HIP_HOME is not None:
-            if hip_version < Version("6.0"):
-                raise RuntimeError(
-                    f"{PACKAGE_NAME} is only supported on ROCm 6.0 and above.  "
-                    "Note: make sure HIP has a supported version by running hipcc --version."
-                )
-            if hip_version == Version("6.0"):
-                warnings.warn(
-                    f"{PACKAGE_NAME} requires a patch to be applied when running on ROCm 6.0. "
-                    "Refer to the README.md for detailed instructions.",
-                    UserWarning
-                )
-
-        cc_flag.append("-DBUILD_PYTHON_PACKAGE")
-
-    else:
-        check_if_cuda_home_none(PACKAGE_NAME)
-        # Check, if CUDA11 is installed for compute capability 8.0
-
-        if CUDA_HOME is not None:
-            _, bare_metal_version = get_cuda_bare_metal_version(CUDA_HOME)
-            if bare_metal_version < Version("11.6"):
-                raise RuntimeError(
-                    f"{PACKAGE_NAME} is only supported on CUDA 11.6 and above.  "
-                    "Note: make sure nvcc has a supported version by running nvcc -V."
-                )
-
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_53,code=sm_53")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_62,code=sm_62")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_70,code=sm_70")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_72,code=sm_72")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_80,code=sm_80")
-        cc_flag.append("-gencode")
-        cc_flag.append("arch=compute_87,code=sm_87")
-
-        if bare_metal_version >= Version("11.8"):
-            cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_90,code=sm_90")
-        if bare_metal_version >= Version("12.8"):
-            cc_flag.append("-gencode")
-            cc_flag.append("arch=compute_100,code=sm_100")
-
-
-    # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
-    # torch._C._GLIBCXX_USE_CXX11_ABI
-    # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
-    if FORCE_CXX11_ABI:
-        torch._C._GLIBCXX_USE_CXX11_ABI = True
-
-    if HIP_BUILD:
-
-        extra_compile_args = {
-            "cxx": ["-O3", "-std=c++17"],
-            "nvcc": [
-                "-O3",
-                "-std=c++17",
-                f"--offload-arch={os.getenv('HIP_ARCHITECTURES', 'native')}",
-                "-U__CUDA_NO_HALF_OPERATORS__",
-                "-U__CUDA_NO_HALF_CONVERSIONS__",
-                "-fgpu-flush-denormals-to-zero",
-            ]
-            + cc_flag,
-        }
-    else:
-        extra_compile_args = {
-            "cxx": ["-O3", "-std=c++17"],
-            "nvcc": append_nvcc_threads(
-                [
-                    "-O3",
-                    "-std=c++17",
-                    "-U__CUDA_NO_HALF_OPERATORS__",
-                    "-U__CUDA_NO_HALF_CONVERSIONS__",
-                    "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-                    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                    "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                    "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-                    "--expt-relaxed-constexpr",
-                    "--expt-extended-lambda",
-                    "--use_fast_math",
-                    "--ptxas-options=-v",
-                    "-lineinfo",
-                ]
-                + cc_flag
-            ),
-        }
-
-    ext_modules.append(
-        CUDAExtension(
-            name="selective_scan_cuda",
-            sources=[
-                "csrc/selective_scan/selective_scan.cpp",
-                "csrc/selective_scan/selective_scan_fwd_fp32.cu",
-                "csrc/selective_scan/selective_scan_fwd_fp16.cu",
-                "csrc/selective_scan/selective_scan_fwd_bf16.cu",
-                "csrc/selective_scan/selective_scan_bwd_fp32_real.cu",
-                "csrc/selective_scan/selective_scan_bwd_fp32_complex.cu",
-                "csrc/selective_scan/selective_scan_bwd_fp16_real.cu",
-                "csrc/selective_scan/selective_scan_bwd_fp16_complex.cu",
-                "csrc/selective_scan/selective_scan_bwd_bf16_real.cu",
-                "csrc/selective_scan/selective_scan_bwd_bf16_complex.cu",
-            ],
-            extra_compile_args=extra_compile_args,
-            include_dirs=[Path(this_dir) / "csrc" / "selective_scan"],
-        )
-    )
-
 
 def get_package_version():
     with open(Path(this_dir) / PACKAGE_NAME / "__init__.py", "r") as f:
