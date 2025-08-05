@@ -124,9 +124,9 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
     HAS_D: tl.constexpr,
     D_HAS_HDIM: tl.constexpr,
     HAS_SEQ_IDX: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
     IS_TRITON_22: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
     pid_bc = tl.program_id(axis=1)
     pid_c = pid_bc // batch
@@ -303,8 +303,8 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
             dx.stride(0), dx.stride(1), dx.stride(2), dx.stride(3),
             ddt.stride(0), ddt.stride(2), ddt.stride(1), ddt.stride(3),
             dD_strides[1], dD_strides[2], dD_strides[3], dD_strides[0], dD_strides[4],
-            D is not None,
-            D.dim() == 2 if D is not None else True,
+            HAS_D=D is not None,
+            D_HAS_HDIM=D.dim() == 2 if D is not None else True,
             HAS_SEQ_IDX=seq_idx is not None,
             BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
             IS_TRITON_22=TRITON_22
