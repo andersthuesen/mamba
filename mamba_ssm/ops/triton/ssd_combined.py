@@ -1,8 +1,5 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 
-"""We want triton==2.1.0 or 2.2.0 for this
-"""
-
 from typing import Optional
 
 import math
@@ -408,9 +405,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         ddt_given = ddt
     else:
         ddt_given = torch.empty_like(dt)
-    # TD: For some reason Triton (2.1.0 and 2.2.0) errors with
-    # "[CUDA]: invalid device context" (e.g. during varlne test), and cloning makes it work. Idk why.
-    dt_in = dt.clone()
+    dt_in = dt
     dA_cumsum, dt = _chunk_cumsum_fwd(dt_in, A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus,
                                       dt_limit=dt_limit)
     CB = _bmm_chunk_fwd(C, B, chunk_size, seq_idx=seq_idx, output_dtype=torch.float32)
@@ -894,14 +889,9 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
         B = rearrange(B, "b l (g n) -> b l g n", g=ctx.ngroups)
         C = rearrange(C, "b l (g n) -> b l g n", g=ctx.ngroups)
-        dzxbcdt = torch.empty_like(zxbcdt)
-        dzx0, dz, dxBC_given, ddt_given = torch.split(dzxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
-        dxBC = torch.empty_like(xBC)
-        dx, dB, dC = torch.split(dxBC, [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
+        dzx0, dz, dxBC_given, ddt_given = torch.empty_like(zx0), torch.empty_like(z), torch.empty_like(xBC), torch.empty_like(dt)
+        dx, dB, dC = torch.empty_like(x), torch.empty_like(B), torch.empty_like(C)
         z = rearrange(z, "b l (h p) -> b l h p", h=nheads)
-        dx = rearrange(dx, "b l (h p) -> b l h p", h=nheads)
-        dB = rearrange(dB, "b l (g n) -> b l g n", g=ctx.ngroups)
-        dC = rearrange(dC, "b l (g n) -> b l g n", g=ctx.ngroups)
         if outproj_weight is not None:
             dout_og = dout
             dout = F.linear(dout, outproj_weight.t())
@@ -936,15 +926,17 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         else:
             doutproj_weight, doutproj_bias = None, None
         dxBC_given = rearrange(dxBC_given, "b s d -> b d s")
+        dxBC = torch.cat([dx.flatten(2), dB.flatten(2), dC.flatten(2)], dim=-1).mT
         dxBC_given_update, dweight, dbias, *_ = causal_conv1d_bwd_function(
             rearrange_and_update_stride(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
-            rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, rearrange_and_update_stride(dxBC_given), False, ctx.activation in ["silu", "swish"]
+            dxBC, seq_idx, None, None, rearrange_and_update_stride(dxBC_given), False, ctx.activation in ["silu", "swish"]
         )
         if dxBC_given.stride() != dxBC_given_update.stride():
             dxBC_given.copy_(dxBC_given_update)
         else:
             dxBC_given = dxBC_given_update
         dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
+        dzxbcdt = torch.cat([dzx0, dz.unflatten(0, dzx0.shape[:2]), dxBC_given, ddt_given], dim=-1)
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
 
