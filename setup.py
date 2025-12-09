@@ -1,29 +1,21 @@
 # Copyright (c) 2023, Albert Gu, Tri Dao.
-import sys
-import warnings
-import os
-import re
 import ast
-from pathlib import Path
-from packaging.version import parse, Version
+import os
 import platform
+import re
 import shutil
-
-from setuptools import setup, find_packages
 import subprocess
-
-import urllib.request
+import sys
 import urllib.error
-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+import urllib.request
+import warnings
+from pathlib import Path
 
 import torch
-from torch.utils.cpp_extension import (
-    BuildExtension,
-    CUDAExtension,
-    CUDA_HOME,
-    HIP_HOME
-)
-
+from packaging.version import Version, parse
+from setuptools import find_packages, setup
+from torch.utils.cpp_extension import CUDA_HOME, HIP_HOME, BuildExtension, CUDAExtension
+from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -34,12 +26,12 @@ this_dir = os.path.dirname(os.path.abspath(__file__))
 
 PACKAGE_NAME = "mamba_ssm"
 
-BASE_WHEEL_URL = "https://github.com/state-spaces/mamba/releases/download/{tag_name}/{wheel_name}"
+BASE_WHEEL_URL = (
+    "https://github.com/state-spaces/mamba/releases/download/{tag_name}/{wheel_name}"
+)
 
 # FORCE_BUILD: Force a fresh build locally, instead of attempting to find prebuilt wheels
-# SKIP_CUDA_BUILD: Intended to allow CI to use a simple `python setup.py sdist` run to copy over raw files, without any cuda compilation
-FORCE_BUILD = os.getenv("MAMBA_FORCE_BUILD", "FALSE") == "TRUE"
-SKIP_CUDA_BUILD = os.getenv("MAMBA_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
+FORCE_BUILD = True
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("MAMBA_FORCE_CXX11_ABI", "FALSE") == "TRUE"
 
@@ -71,7 +63,6 @@ def get_cuda_bare_metal_version(cuda_dir):
 
 
 def get_hip_version(rocm_dir):
-
     hipcc_bin = "hipcc" if rocm_dir is None else os.path.join(rocm_dir, "bin", "hipcc")
     try:
         raw_output = subprocess.check_output(
@@ -85,22 +76,22 @@ def get_hip_version(rocm_dir):
 
     for line in raw_output.split("\n"):
         if "HIP version" in line:
-            rocm_version = parse(line.split()[-1].rstrip('-').replace('-', '+')) # local version is not parsed correctly
+            rocm_version = parse(
+                line.split()[-1].rstrip("-").replace("-", "+")
+            )  # local version is not parsed correctly
             return line, rocm_version
 
     return None, None
 
 
 def get_torch_hip_version():
-
     if torch.version.hip:
-        return parse(torch.version.hip.split()[-1].rstrip('-').replace('-', '+'))
+        return parse(torch.version.hip.split()[-1].rstrip("-").replace("-", "+"))
     else:
         return None
 
 
 def check_if_hip_home_none(global_option: str) -> None:
-
     if HIP_HOME is not None:
         return
     # warn instead of error because user could be downloading prebuilt wheels, so hipcc won't be necessary
@@ -131,6 +122,7 @@ ext_modules = []
 
 
 HIP_BUILD = bool(torch.version.hip)
+SKIP_CUDA_BUILD = os.getenv("MAMBA_SKIP_CUDA_BUILD", "FALSE") == "TRUE"
 
 if not SKIP_CUDA_BUILD:
     print("\n\ntorch.__version__  = {}\n\n".format(torch.__version__))
@@ -155,7 +147,7 @@ if not SKIP_CUDA_BUILD:
                 warnings.warn(
                     f"{PACKAGE_NAME} requires a patch to be applied when running on ROCm 6.0. "
                     "Refer to the README.md for detailed instructions.",
-                    UserWarning
+                    UserWarning,
                 )
 
         cc_flag.append("-DBUILD_PYTHON_PACKAGE")
@@ -203,7 +195,6 @@ if not SKIP_CUDA_BUILD:
             cc_flag.append("-gencode")
             cc_flag.append("arch=compute_121,code=sm_121")
 
-
     # HACK: The compiler flag -D_GLIBCXX_USE_CXX11_ABI is set to be the same as
     # torch._C._GLIBCXX_USE_CXX11_ABI
     # https://github.com/pytorch/pytorch/blob/8472c24e3b5b60150096486616d98b7bea01500b/torch/utils/cpp_extension.py#L920
@@ -211,7 +202,6 @@ if not SKIP_CUDA_BUILD:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
 
     if HIP_BUILD:
-
         extra_compile_args = {
             "cxx": ["-O3", "-std=c++17"],
             "nvcc": [
@@ -301,7 +291,7 @@ def get_wheel_url():
             torch_cuda_version = parse("13.0")
         else:
             raise ValueError(f"CUDA version {torch_cuda_version} not supported")
-        
+
         cuda_version = f"{torch_cuda_version.major}"
 
     gpu_compute_version = hip_ver if HIP_BUILD else cuda_version
@@ -357,6 +347,7 @@ class CachedWheelsCommand(_bdist_wheel):
             print("Precompiled wheel not found. Building from source...")
             # If the wheel could not be downloaded, build from source
             super().run()
+
 
 setup(
     name=PACKAGE_NAME,

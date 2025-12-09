@@ -184,7 +184,7 @@ def _bmm_chunk_fwd(a, b, chunk_size, seq_idx=None, causal=False, output_dtype=No
         a = a.contiguous()
     if b.stride(-1) != 1 and b.stride(1) != 1:
         b = b.contiguous()
-    nchunks = math.ceil(seqlen / chunk_size)
+    nchunks = (seqlen+chunk_size-1)//chunk_size
     # Allocates output.
     out_dtype = a.dtype if output_dtype is None else output_dtype
     out = torch.empty((batch, nchunks, chunk_size, chunk_size) if not has_groups else (batch, nchunks, ngroups, chunk_size, chunk_size),
@@ -232,7 +232,6 @@ def _bmm_chunk_bwd(a, dout, residual=None, out=None):
     if dout.stride(-1) != 1 and dout.stride(-2) != 1:
         dout = dout.contiguous()
     if residual is not None:
-        assert residual.shape == (batch, seqlen, k) if not has_groups else (batch, seqlen, ngroups, k)
         if residual.stride(-1) != 1 and residual.stride(1) != 1:
             residual = residual.contiguous()
     # Allocates output.

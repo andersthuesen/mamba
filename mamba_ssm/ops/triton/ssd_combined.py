@@ -1,8 +1,5 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 
-"""We want triton==2.1.0 or 2.2.0 for this
-"""
-
 from typing import Optional
 
 import math
@@ -18,14 +15,40 @@ import triton.language as tl
 
 from einops import rearrange, repeat
 
-try:
-    from causal_conv1d import causal_conv1d_fn
-    from causal_conv1d.cpp_functions import causal_conv1d_fwd_function, causal_conv1d_bwd_function, causal_conv1d_update_function
-except ImportError:
-    causal_conv1d_fn = None
-    causal_conv1d_fwd_function = None
-    causal_conv1d_bwd_function = None
-    causal_conv1d_update_function = None
+### Patch 1: make causal_conv1d_fwd_function that transposes internally, to avoid custom_op having to see non-contig tensor
+from causal_conv1d import causal_conv1d_fn
+from causal_conv1d.cpp_functions import causal_conv1d_fwd_function, causal_conv1d_bwd_function, causal_conv1d_update_function, causal_conv1d_cuda
+
+@torch.library.custom_op(f"DaoAILabPatch::_causal_conv1d_fwd_cpp", mutates_args={"out", "final_states_out"})
+def _causal_conv1d_fwd_cpp(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    seq_idx: torch.Tensor | None,
+    initial_states: torch.Tensor | None,
+    out: torch.Tensor,
+    final_states_out: torch.Tensor | None,
+    silu_activation: bool,
+) -> None:
+    causal_conv1d_cuda.causal_conv1d_fwd(
+        x.mT,
+        weight,
+        bias,
+        seq_idx,
+        initial_states,
+        out.mT,
+        final_states_out,
+        silu_activation,
+    )
+def causal_conv1d_fwd_function_transposed(
+    x, weight, bias, seq_idx, initial_states, final_states_out, silu_activation
+):
+    _causal_conv1d_fwd_cpp(
+        x, weight, bias, seq_idx, initial_states,
+        out:=torch.empty_like(x), final_states_out, silu_activation
+    )
+    return out
+###
 
 from mamba_ssm.ops.triton.ssd_bmm import _bmm_chunk_fwd, _bmm_chunk_bwd
 from mamba_ssm.ops.triton.ssd_chunk_state import _chunk_cumsum_fwd, _chunk_cumsum_bwd
@@ -59,17 +82,18 @@ def rearrange_and_update_stride(tensor, pattern=None, dim=2):
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4, pre_hook=init_to_zero(["ddt_ptr"])),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 32, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=5, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}, num_stages=4, num_warps=4),
     ],
     key=['chunk_size', 'hdim', 'dstate'],
+    reset_to_zero=['ddt_ptr'],
 )
 @triton.jit
 def _chunk_scan_chunk_state_bwd_dx_kernel(
@@ -97,9 +121,9 @@ def _chunk_scan_chunk_state_bwd_dx_kernel(
     HAS_D: tl.constexpr,
     D_HAS_HDIM: tl.constexpr,
     HAS_SEQ_IDX: tl.constexpr,
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
     IS_TRITON_22: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
 ):
     pid_bc = tl.program_id(axis=1)
     pid_c = pid_bc // batch
@@ -246,7 +270,7 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
         assert D.shape == (nheads, headdim) or D.shape == (nheads,)
         assert D.stride(-1) == 1
         BLOCK_SIZE_min = 32
-        dD = torch.empty(triton.cdiv(chunk_size, BLOCK_SIZE_min), batch, nchunks, nheads,
+        dD = torch.zeros(triton.cdiv(chunk_size, BLOCK_SIZE_min), batch, nchunks, nheads,
                          headdim if D.dim() == 2 else 1, device=D.device, dtype=torch.float32)
     else:
         dD = None
@@ -256,7 +280,7 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
         dx = torch.empty_like(x)
     else:
         assert dx.shape == x.shape
-    ddt = torch.empty(batch, nheads, nchunks, chunk_size, device=dout.device, dtype=torch.float32)
+    ddt = torch.zeros(batch, nheads, nchunks, chunk_size, device=dout.device, dtype=torch.float32)
     grid_dx = lambda META: (triton.cdiv(chunk_size, META['BLOCK_SIZE_M']) * triton.cdiv(headdim, META['BLOCK_SIZE_N']),
                         batch * nchunks, nheads)
     with torch.cuda.device(x.device.index):
@@ -276,18 +300,15 @@ def _chunk_scan_chunk_state_bwd_dx(x, dt, dA_cumsum, B, CB, dout, dstates, D=Non
             dx.stride(0), dx.stride(1), dx.stride(2), dx.stride(3),
             ddt.stride(0), ddt.stride(2), ddt.stride(1), ddt.stride(3),
             dD_strides[1], dD_strides[2], dD_strides[3], dD_strides[0], dD_strides[4],
-            D is not None,
-            D.dim() == 2 if D is not None else True,
+            HAS_D=D is not None,
+            D_HAS_HDIM=D.dim() == 2 if D is not None else True,
             HAS_SEQ_IDX=seq_idx is not None,
             BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
             IS_TRITON_22=TRITON_22
         )
     if D is not None:
-        BLOCK_SIZE_actual = _chunk_scan_chunk_state_bwd_dx_kernel.best_config.kwargs["BLOCK_SIZE_M"]
-        n_valid_blocks = (chunk_size + BLOCK_SIZE_actual - 1) // BLOCK_SIZE_actual
-        dD = dD[:n_valid_blocks].sum(dim=(0, 1, 2)).to(dtype=D.dtype)
-        if D.dim() == 1:
-            dD = rearrange(dD, "h 1 -> h")
+        dD = dD.sum(dim=(0, 1, 2)).to(dtype=D.dtype)
+        if D.dim() == 1: dD = dD.squeeze(-1)
     return dx, ddt.to(dtype=dt.dtype), dD
 
 
@@ -384,9 +405,7 @@ def _mamba_chunk_scan_combined_bwd(dout, x, dt, A, B, C, out, chunk_size, D=None
         ddt_given = ddt
     else:
         ddt_given = torch.empty_like(dt)
-    # TD: For some reason Triton (2.1.0 and 2.2.0) errors with
-    # "[CUDA]: invalid device context" (e.g. during varlne test), and cloning makes it work. Idk why.
-    dt_in = dt.clone()
+    dt_in = dt
     dA_cumsum, dt = _chunk_cumsum_fwd(dt_in, A, chunk_size, dt_bias=dt_bias, dt_softplus=dt_softplus,
                                       dt_limit=dt_limit)
     CB = _bmm_chunk_fwd(C, B, chunk_size, seq_idx=seq_idx, output_dtype=torch.float32)
@@ -764,6 +783,7 @@ def mamba_conv1d_scan_ref(xBC, conv1d_weight, conv1d_bias, dt, A, chunk_size, D=
     return rearrange(out, "b s h p -> b s (h p)")
 
 
+### Patch 1 is used here
 class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
 
     @staticmethod
@@ -788,10 +808,9 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         assert A.shape == (nheads,)
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + ngroups * dstate * 2, nheads], dim=-1)
         seq_idx = seq_idx.contiguous() if seq_idx is not None else None
-        xBC_conv = rearrange(
-            causal_conv1d_fwd_function(rearrange_and_update_stride(xBC, "b s d -> b d s"),
-                                                 conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]),
-            "b d s -> b s d"
+        assert xBC.stride(-2) % 8 == 0
+        xBC_conv = causal_conv1d_fwd_function_transposed(
+            xBC, conv1d_weight, conv1d_bias, seq_idx, None, None, activation in ["silu", "swish"]
         )
         x, B, C = torch.split(xBC_conv, [dim, ngroups * dstate, ngroups * dstate], dim=-1)
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
@@ -862,23 +881,17 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
             out0_recompute, out1_recompute = out_recompute.split([d_nonssm, dim], dim=-1)
         zx0, z, xBC, dt = torch.split(zxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
         # Recompute x, B, C
-        xBC_conv = rearrange(
-            causal_conv1d_fwd_function(rearrange_and_update_stride(xBC, "b s d -> b d s"),
-                                       conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]),
-            "b d s -> b s d"
+        assert xBC.stride(-2) % 8 == 0
+        xBC_conv = causal_conv1d_fwd_function_transposed(
+            xBC, conv1d_weight, conv1d_bias, seq_idx, None, None, ctx.activation in ["silu", "swish"]
         )
         x, B, C = torch.split(xBC_conv, [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
         x = rearrange(x, "b l (h p) -> b l h p", h=nheads)
         B = rearrange(B, "b l (g n) -> b l g n", g=ctx.ngroups)
         C = rearrange(C, "b l (g n) -> b l g n", g=ctx.ngroups)
-        dzxbcdt = torch.empty_like(zxbcdt)
-        dzx0, dz, dxBC_given, ddt_given = torch.split(dzxbcdt, [2 * d_nonssm, dim, dim + 2 * ctx.ngroups * dstate, nheads], dim=-1)
-        dxBC = torch.empty_like(xBC)
-        dx, dB, dC = torch.split(dxBC, [dim, ctx.ngroups * dstate, ctx.ngroups * dstate], dim=-1)
+        dzx0, dz, dxBC_given, ddt_given = torch.empty_like(zx0), torch.empty_like(z), torch.empty_like(xBC), torch.empty_like(dt)
+        dx, dB, dC = torch.empty_like(x), torch.empty_like(B), torch.empty_like(C)
         z = rearrange(z, "b l (h p) -> b l h p", h=nheads)
-        dx = rearrange(dx, "b l (h p) -> b l h p", h=nheads)
-        dB = rearrange(dB, "b l (g n) -> b l g n", g=ctx.ngroups)
-        dC = rearrange(dC, "b l (g n) -> b l g n", g=ctx.ngroups)
         if outproj_weight is not None:
             dout_og = dout
             dout = F.linear(dout, outproj_weight.t())
@@ -913,15 +926,17 @@ class MambaSplitConv1dScanCombinedFn(torch.autograd.Function):
         else:
             doutproj_weight, doutproj_bias = None, None
         dxBC_given = rearrange(dxBC_given, "b s d -> b d s")
+        dxBC = torch.cat([dx.flatten(2), dB.flatten(2), dC.flatten(2)], dim=-1).mT
         dxBC_given_update, dweight, dbias, *_ = causal_conv1d_bwd_function(
             rearrange_and_update_stride(xBC, "b s d -> b d s"), conv1d_weight, conv1d_bias,
-            rearrange(dxBC, "b s d -> b d s"), seq_idx, None, None, rearrange_and_update_stride(dxBC_given), False, ctx.activation in ["silu", "swish"]
+            dxBC, seq_idx, None, None, rearrange_and_update_stride(dxBC_given), False, ctx.activation in ["silu", "swish"]
         )
         if dxBC_given.stride() != dxBC_given_update.stride():
             dxBC_given.copy_(dxBC_given_update)
         else:
             dxBC_given = dxBC_given_update
         dxBC_given = rearrange(dxBC_given, "b d s -> b s d")
+        dzxbcdt = torch.cat([dzx0, dz.unflatten(0, dzx0.shape[:2]), dxBC_given, ddt_given], dim=-1)
         return dzxbcdt, dweight, dbias, ddt_bias, dA, dD, None, dinitial_states, None, None, None, None, drmsnorm_weight, None, doutproj_weight, doutproj_bias, None, None, None
 
 
